@@ -1,0 +1,10 @@
+#include "hella_reader.hpp"
+#include <algorithm>
+#include <cmath>
+#include "driver/adc.h"
+#include "driver/gpio.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/portmacro.h"
+namespace {constexpr gpio_num_t in=GPIO_NUM_34;constexpr adc1_channel_t adc=ADC1_CHANNEL_7;constexpr float r1=27000,r2=4700;portMUX_TYPE mux=portMUX_INITIALIZER_UNLOCKED;volatile uint32_t lo[3]{},hi[3]{};volatile bool fresh[3]{};volatile int ch=0,last=1;volatile int64_t edge=0,lastRise=0;void IRAM_ATTR isr(void*){portENTER_CRITICAL_ISR(&mux);int64_t now=esp_timer_get_time();int level=gpio_get_level(in);if(level==last){portEXIT_CRITICAL_ISR(&mux);return;}if(level){uint32_t period=now-lastRise;lo[ch]=period;if(period<3000)ch=0;else ch=(ch+1)%3;lastRise=now;}else{hi[ch]=now-lastRise;fresh[ch]=true;}edge=now;last=level;portEXIT_CRITICAL_ISR(&mux);}}
+namespace hella {bool begin(){gpio_config_t c{};c.pin_bit_mask=1ULL<<in;c.mode=GPIO_MODE_INPUT;c.intr_type=GPIO_INTR_ANYEDGE;if(gpio_config(&c)!=ESP_OK)return false;if(gpio_install_isr_service(ESP_INTR_FLAG_IRAM)!=ESP_OK)return false;edge=lastRise=esp_timer_get_time();last=gpio_get_level(in);if(gpio_isr_handler_add(in,isr,nullptr)!=ESP_OK)return false;adc1_config_width(ADC_WIDTH_BIT_12);adc1_config_channel_atten(adc,ADC_ATTEN_DB_11);return true;}Reading read(){uint32_t a[3]{},b[3]{};bool v[3]{};portENTER_CRITICAL(&mux);for(int i=0;i<3;i++){a[i]=lo[i];b[i]=hi[i];v[i]=fresh[i];fresh[i]=false;}portEXIT_CRITICAL(&mux);Reading x{};if(v[0]&&a[0]){x.oil_c=((4096.f/a[0])*b[0]-128.f)/19.2f-40.f;x.oil_valid=std::isfinite(x.oil_c)&&x.oil_c>-40&&x.oil_c<250;}if(v[1]&&a[1]){x.pressure_bar=std::max(0.f,(((4096.f/a[1])*b[1]-128.f)/384.f+.5f)-.88f);x.pressure_valid=std::isfinite(x.pressure_bar)&&x.pressure_bar<20;}if(v[2]&&a[2]){x.auxiliary=1024.f/a[2]*b[2];if(x.auxiliary>=231&&x.auxiliary<=281)x.auxiliary=1;x.auxiliary_valid=std::isfinite(x.auxiliary);}float vin=adc1_get_raw(adc)*3.3f/4095.f;x.battery_v=std::clamp((vin-.10f)*((r1+r2)/r2),0.f,18.f);return x;}}
